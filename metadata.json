@@ -1,0 +1,7 @@
+{
+  "name": "Supa Shots",
+  "description": "AI-powered cinematic shot generator that transforms a single image into 9 professional camera angles using Google Gemini.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
