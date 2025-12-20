@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { GeneratedImage, ProductStyle, SubjectType, AspectRatio, ProjectHistory } from './types';
 import { PRODUCT_STYLES, HUMAN_STYLES, ASPECT_RATIOS, getShotDefinition } from './constants';
 import { generateShot, analyzeProduct, editShot } from './services/geminiService';
@@ -36,6 +36,9 @@ const App: React.FC = () => {
   // History State
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+
+  // Cancellation Ref
+  const cancelGenerationRef = useRef(false);
 
   // Determine which set of styles to display/generate based on current subject mode
   const activeStyles = subjectType === SubjectType.HUMAN ? HUMAN_STYLES : PRODUCT_STYLES;
@@ -98,9 +101,29 @@ const App: React.FC = () => {
     return projectId;
   };
 
+  const handleCancelGeneration = () => {
+    cancelGenerationRef.current = true;
+    setIsGenerating(false);
+    
+    setGeneratedShots(prev => {
+      const updated = { ...prev };
+      Object.keys(updated).forEach(key => {
+        if (updated[key].isLoading) {
+          updated[key] = {
+            ...updated[key],
+            isLoading: false,
+            error: 'Cancelled'
+          };
+        }
+      });
+      return updated;
+    });
+  };
+
   const handleGenerate = async () => {
     if (!sourceImage) return;
 
+    cancelGenerationRef.current = false;
     setIsGenerating(true);
     setSelectedShotIds(new Set());
     
@@ -135,17 +158,22 @@ const App: React.FC = () => {
     const CONCURRENCY = 1;
 
     const processQueue = async () => {
+      if (cancelGenerationRef.current) return;
       if (queue.length === 0) return;
 
       const batch = queue.splice(0, CONCURRENCY);
       
       const promises = batch.map(async (type) => {
+        if (cancelGenerationRef.current) return;
+        
         try {
           const definition = getShotDefinition(type, subjectType);
           
           // Pass productDescription to generation
           const imageUrl = await generateShot(sourceImage, definition, productName, productDescription, aspectRatio);
           
+          if (cancelGenerationRef.current) return;
+
           setGeneratedShots(prev => {
             const next = {
               ...prev,
@@ -159,48 +187,49 @@ const App: React.FC = () => {
           });
         } catch (error) {
           console.error(error);
-          setGeneratedShots(prev => ({
-            ...prev,
-            [type]: {
-              ...prev[type],
-              isLoading: false,
-              error: 'Failed to generate'
-            }
-          }));
+          if (!cancelGenerationRef.current) {
+            setGeneratedShots(prev => ({
+              ...prev,
+              [type]: {
+                ...prev[type],
+                isLoading: false,
+                error: 'Failed to generate'
+              }
+            }));
+          }
         }
       });
 
       await Promise.all(promises);
+
+      if (cancelGenerationRef.current) return;
 
       // Add a small delay between requests to be nice to the API
       if (queue.length > 0) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
+      if (cancelGenerationRef.current) return;
+
       await processQueue();
     };
 
     try {
       await processQueue();
-      // Save history after batch completes
-      // We need to access the latest state, using callback in setGeneratedShots is tricky for side effects
-      // So we will pass the current state to the saver, but we need the LATEST state.
-      // A simple way is to use a ref or just rely on React's state update queue. 
-      // Safest is to wait a tick or just save what we have. 
-      // Actually, since processQueue awaits state updates (indirectly), we can grab state via a functional update wrapper or just use the result of the process.
-      // Better approach for simplicity: Call save inside the setGeneratedShots callback? No.
-      // Let's just re-read state? No, closure.
-      // We will rely on the fact that we updated the state locally in this closure's references if we tracked it, but we didn't.
-      // Let's use a functional update to trigger the save.
-      setGeneratedShots(finalShots => {
-        saveToHistory(finalShots, activeProjectId);
-        return finalShots;
-      });
-
+      
+      if (!cancelGenerationRef.current) {
+        // Save history after batch completes
+        setGeneratedShots(finalShots => {
+          saveToHistory(finalShots, activeProjectId);
+          return finalShots;
+        });
+      }
     } catch (e) {
       console.error("Batch processing error", e);
     } finally {
-      setIsGenerating(false);
+      if (!cancelGenerationRef.current) {
+        setIsGenerating(false);
+      }
     }
   };
 
@@ -306,6 +335,7 @@ const App: React.FC = () => {
   };
 
   const handleReset = () => {
+    cancelGenerationRef.current = true; // ensure any pending are cancelled
     setSourceImage(null);
     setGeneratedShots({});
     setSelectedShotIds(new Set());
@@ -472,9 +502,9 @@ const App: React.FC = () => {
                 </p>
               </div>
 
-              <div className="flex-shrink-0 flex flex-col items-end gap-3">
+              <div className="flex-shrink-0 flex flex-col items-end gap-3 w-full md:w-auto">
                 {!hasGeneratedShots ? (
-                   <Button variant="primary" size="lg" onClick={handleGenerate} className="shadow-lg shadow-indigo-500/20" disabled={isDetecting}>
+                   <Button variant="primary" size="lg" onClick={handleGenerate} className="shadow-lg shadow-indigo-500/20 w-full md:w-auto" disabled={isDetecting}>
                      <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
                      </svg>
@@ -486,7 +516,7 @@ const App: React.FC = () => {
                        <span className="text-sm font-medium text-indigo-400 mb-2">
                          {isGenerating ? 'Processing...' : 'Generation Complete'}
                        </span>
-                       <div className="w-32 bg-slate-700 rounded-full h-2">
+                       <div className="w-full md:w-48 bg-slate-700 rounded-full h-2">
                          <div 
                            className="bg-indigo-500 h-2 rounded-full transition-all duration-500"
                            style={{ 
@@ -496,14 +526,20 @@ const App: React.FC = () => {
                        </div>
                     </div>
                     
-                    {!isGenerating && (
-                      <Button variant="secondary" size="sm" onClick={handleGenerate} className="w-full">
-                         <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                         </svg>
-                         Regenerate All
-                      </Button>
-                    )}
+                    <div className="flex gap-2 w-full">
+                      {isGenerating ? (
+                        <Button variant="danger" size="sm" onClick={handleCancelGeneration} className="w-full">
+                          Cancel
+                        </Button>
+                      ) : (
+                        <Button variant="secondary" size="sm" onClick={handleGenerate} className="w-full">
+                           <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                           </svg>
+                           Regenerate All
+                        </Button>
+                      )}
+                    </div>
                   </>
                 )}
               </div>
